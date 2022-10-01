@@ -1,0 +1,72 @@
+name: Infrastructure
+
+on:   
+  push:
+    branches:
+      - master
+    paths:
+      - Infrastructure/**
+  pull_request:
+    branches:
+      - master
+    paths:
+      - Infrastructure/**
+
+jobs:
+  Terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: Infrastructure/DigitalOcean
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      -   name: Run Analysis
+          uses: codescan-io/codescan-scanner-action@master
+          with:
+            login: ${{ secrets.CODESCAN_AUTH_TOKEN }}
+            organization: ${{ secrets.CODESCAN_ORGANIZATION_KEY }}
+            projectKey: ${{ secrets.CODESCAN_PROJECT_KEY }}
+            args: |
+              sonar.verbose=true
+              sonar.java.binaries=target
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+            sarif_file: codescan.sarif
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-sarif-action@9a83b5c3524f825c020e356335855741fd02745f
+        with:
+          sarif_file: tfsec.sarif
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: tfsec.sarif
+      - name: Terraform Init
+        id: init
+        run: terraform init
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -var="DIGITAL_OCEAN_TOKEN=${{ secrets.DIGITAL_OCEAN_TOKEN }}" -no-color -input=false
+        continue-on-error: true
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+      - name: Terraform Apply
+        run: terraform apply -var="DIGITAL_OCEAN_TOKEN=${{ secrets.DIGITAL_OCEAN_TOKEN }}" -auto-approve -input=false

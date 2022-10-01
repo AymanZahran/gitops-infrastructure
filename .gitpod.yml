@@ -1,0 +1,181 @@
+image: aymanzahran/ipad-gitpod-image
+  #file: Dockerfile.Dockerfile
+tasks:
+  - name: persist env
+    command: eval $(gp env -e)
+
+  - name: Authenticate Terraform Cloud
+    init: |
+      mkdir -p ~/.terraform.d/
+      cat << EOF > ~/.terraform.d/credentials.tfrc.json
+      {
+        "credentials": {
+          "app.terraform.io": {
+            "token": "$TF_API_TOKEN"
+          }
+        }
+      }
+      EOF
+    command: |
+      echo "Terraform Authenticated"
+      gp sync-done terraform-authenticated
+  
+  - name: Authenticate Provider
+    init: |
+      if [[ $K8S_PROVIDER == "AWS" ]]
+      then
+        echo "[gitpod]" > ~/.aws/config
+        echo "region = $AWS_DEFAULT_REGION" >> ~/.aws/config
+        echo "cli_auto_prompt = on-partial" >> ~/.aws/config
+        echo "[gitpod]" > ~/.aws/credentials
+        echo "aws_access_key_id = $AWS_ACCESS_KEY_ID" >> ~/.aws/credentials
+        echo "aws_secret_access_key = $AWS_SECRET_ACCESS_KEY" >> ~/.aws/credentials
+      elif [[ $K8S_PROVIDER == "AZURE" ]]
+      then
+        echo "Pending.."
+      elif [[ $K8S_PROVIDER == "GCP" ]]
+      then
+        echo "Pending.."
+      elif [[ $K8S_PROVIDER == "DIGITAL_OCEAN" ]]
+      then
+        mkdir -p ~/.config/doctl
+        echo "access-token: $DIGITAL_OCEAN_TOKEN" > ~/.config/doctl/config.yaml
+      else
+        echo "No Provider to Authenticate"
+      fi
+    command: |
+      echo "$K8S_PROVIDER Authenticated"
+      gp sync-done provider-authenticated
+
+  - name: Deploy Kubernetes Cluster
+    init: |
+      gp sync-await terraform-authenticated
+      gp sync-await provider-authenticated
+    command: |
+      if [[ "$K8S_PROVIDER" == "AWS" ]]
+      then
+        eksctl create cluster -f ./AWS/EKS-Cluster.yml
+      elif [[ $K8S_PROVIDER == "AZURE" ]]
+      then
+        echo "Pending.."
+      elif [[ $K8S_PROVIDER == "GCP" ]]
+      then
+        echo "Pending.."
+      elif [[ $K8S_PROVIDER == "DIGITAL_OCEAN" ]]
+      then
+        cd DigitalOcean
+        terraform init
+        terraform apply -var="DIGITAL_OCEAN_TOKEN=$DIGITAL_OCEAN_TOKEN" --auto-approve
+        doctl kubernetes cluster kubeconfig save do-cluster
+      else
+        echo $K8S_CONFIG | base64 --decode > ~/.kube/config
+      fi
+      echo "Kubernetes Cluster Deployed"
+      gp sync-done deploy-kubernetes-cluster
+
+  - name: Launch ArgoCD
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      kubectl create namespace argocd
+      kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+      kubectl apply -f Kubernetes/argocd-app.yaml
+    command: |
+      sleep 20
+      kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 --decode && echo
+      kubectl port-forward svc/argocd-server 8080:443 -n argocd
+
+
+
+
+
+
+
+
+  - name: Launch kubernetes-dashboard
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
+      kubectl create ns kubernetes-dashboard
+      helm install -n kubernetes-dashboard kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard
+      helm upgrade -n kubernetes-dashboard kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard
+    command: |
+      sleep 20
+      kubectl port-forward -n kubernetes-dashboard svc/kubernetes-dashboard 3000:443
+
+  - name: Launch metrics-server
+    init: gp sync-await deploy-kubernetes-cluster
+    command: |
+      helm repo add bitnami https://charts.bitnami.com/bitnami
+      kubectl create ns metrics-server
+      helm install -n metrics-server metrics-server bitnami/metrics-server
+       helm upgrade --namespace metrics-server metrics-server bitnami/metrics-server --set apiService.create=true
+
+  - name: Launch kube-prometheus-stack
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      helm repo update
+      kubectl create ns kube-prometheus-stack
+      helm install -n kube-prometheus-stack kube-prometheus-stack prometheus-community/kube-prometheus-stack
+      helm upgrade -n kube-prometheus-stack  kube-prometheus-stack prometheus-community/kube-prometheus-stack
+    command: |
+      sleep 20
+      kubectl port-forward -n kube-prometheus-stack svc/kube-prometheus-stack-prometheus 9090:9090 &
+      kubectl port-forward -n kube-prometheus-stack svc/kube-prometheus-stack-grafana 9091:80 &
+  
+  - name: Launch Jenkins
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      kubectl apply -f Kubernetes/jenkins-master.yaml
+    command: |
+      sleep 20
+      kubectl port-forward service/jenkins-master 8081:80 &
+  
+  - name: Launch Ansible Controller
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      kubectl apply -f Kubernetes/ansible-controller.yaml
+    command: |
+      sleep 20
+      kubectl port-forward service/ansible-controller 8082:80 &
+  
+  - name: Launch Ansible Target
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      kubectl apply -f Kubernetes/ansible-target.yaml
+    command: |
+      sleep 20
+      kubectl port-forward service/ansible-target 8083:80 &
+  
+  - name: Launch NGINX Controller
+    init: |
+      gp sync-await deploy-kubernetes-cluster
+      helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+      helm repo update
+      kubectl create ns nginx
+      helm install -n nginx nginx-ingress ingress-nginx/ingress-nginx
+      helm upgrade -n nginx nginx-ingress ingress-nginx/ingress-nginx
+    command: |
+      kubectl autoscale deployment -n nginx nginx-ingress-ingress-nginx-controller --cpu-percent=50 --min=1 --max=3
+  
+  - name: Launch NGINX Ingress Rules
+    init: gp sync-await deploy-kubernetes-cluster
+    command: |
+      sleep 20
+      kubectl apply -f Kubernetes/ingress.yml
+
+vscode:
+  extensions:
+    - ms-azuretools.vscode-docker
+    - ms-kubernetes-tools.vscode-kubernetes-tools
+    - amazonwebservices.aws-toolkit-vscode
+    - ms-toolsai.jupyter
+    - esbenp.prettier-vscode
+    - dbaeumer.vscode-eslint
+    - hashicorp.terraform
+    - eg2.vscode-npm-script
+    - christian-kohler.npm-intellisense
+    - christian-kohler.path-intellisense
+    - ms-python.python
+    - rangav.vscode-thunder-client
+    - PKief.material-icon-theme
