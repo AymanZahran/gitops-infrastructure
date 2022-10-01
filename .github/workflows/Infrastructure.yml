@@ -4,13 +4,9 @@ on:
   push:
     branches:
       - master
-    paths:
-      - Infrastructure/**
   pull_request:
     branches:
       - master
-    paths:
-      - Infrastructure/**
 
 jobs:
   Terraform:
@@ -19,7 +15,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: Infrastructure/DigitalOcean
+        working-directory: ${{ secrets.K8S_PROVIDER }}
     permissions:
       contents: read
       security-events: write
